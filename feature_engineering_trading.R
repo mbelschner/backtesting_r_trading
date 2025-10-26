@@ -30,10 +30,10 @@ gc()
 #   BORUTA_SAMPLE_SIZE <- 100000
 #   BORUTA_USE_FAST_IMP <- FALSE
 
-BORUTA_MAX_RUNS <- 100        # Anzahl Iterationen (50-200)
-BORUTA_NUM_TREES <- 500       # Anzahl Trees pro Iteration (250-1000)
-BORUTA_SAMPLE_SIZE <- 50000   # Max. Zeilen für Boruta (20000-100000)
-BORUTA_USE_FAST_IMP <- TRUE   # TRUE = schneller, FALSE = genauer
+BORUTA_MAX_RUNS <- 12        # Anzahl Iterationen (50-200)
+BORUTA_NUM_TREES <- 150       # Anzahl Trees pro Iteration (250-1000)
+BORUTA_SAMPLE_SIZE <- 60000   # Max. Zeilen für Boruta (20000-100000)
+BORUTA_USE_FAST_IMP <- FALSE   # TRUE = schneller, FALSE = genauer
 
 # Target Variable Einstellungen
 ATR_PERIOD <- 14
