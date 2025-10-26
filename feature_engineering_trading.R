@@ -55,38 +55,52 @@ dt[, `:=`(
   target_down = close - atr_multiplier * atr_val
 )]
 
+# Füge einen eindeutigen Row-Index hinzu für parallele Verarbeitung
+dt[, row_id := .I]
+
 # Parallel processing nach Tagen
 unique_dates <- unique(dt$date)
+
+cat("Processing", length(unique_dates), "unique dates with parallel processing...\n")
 
 results <- foreach(
   current_date = unique_dates,
   .packages = c('data.table', 'lubridate'),
-  .combine = rbind
+  .combine = function(...) rbindlist(list(...), use.names = TRUE, fill = TRUE),
+  .export = c('dt'),
+  .errorhandling = 'pass'
 ) %dopar% {
-  
+
   day_data <- dt[date == current_date]
-  
-  if (nrow(day_data) <= 1) return(NULL)
-  
+
+  # Wenn zu wenig Daten, gebe leeres data.table zurück (nicht NULL)
+  if (nrow(day_data) <= 1) {
+    return(data.table(
+      row_id = integer(0),
+      y_target_atr = numeric(0),
+      target_reached = as.POSIXct(character(0))
+    ))
+  }
+
   end_of_day <- ymd(current_date) + hm("22:30")
-  
+
   # Ergebnis-Vektoren
   y_vals <- rep(NA_real_, nrow(day_data))
   target_times <- rep(as.POSIXct(NA), nrow(day_data))
-  indices <- day_data[, which = TRUE]
-  
+  row_ids <- day_data$row_id  # Verwende row_id statt which = TRUE
+
   for (i in seq_len(nrow(day_data) - 1)) {
-    
+
     target_up <- day_data$target_up[i]
     target_down <- day_data$target_down[i]
-    
+
     future_subset <- day_data[(i+1):.N][time <= end_of_day]
-    
+
     if (nrow(future_subset) == 0) next
-    
+
     hit_up <- which(future_subset$high >= target_up)[1]
     hit_down <- which(future_subset$low <= target_down)[1]
-    
+
     if (!is.na(hit_up) && (is.na(hit_down) || hit_up < hit_down)) {
       y_vals[i] <- 1
       target_times[i] <- future_subset$time[hit_up]
@@ -97,22 +111,37 @@ results <- foreach(
       y_vals[i] <- 0
     }
   }
-  
+
   data.table(
-    index = indices,
+    row_id = row_ids,
     y_target_atr = y_vals,
     target_reached = target_times
   )
 }
 
 # Merge results zurück
-dt[results$index, `:=`(
-  y_target_atr = results$y_target_atr,
-  target_reached = results$target_reached
-)]
+cat("Processing completed. Merging results...\n")
+cat("Results rows:", nrow(results), "\n")
+
+if (!is.null(results) && nrow(results) > 0) {
+  # Merge basierend auf row_id
+  dt[results$row_id, `:=`(
+    y_target_atr = results$y_target_atr,
+    target_reached = results$target_reached
+  )]
+
+  cat("Target variable successfully calculated for", sum(!is.na(dt$y_target_atr)), "rows\n")
+  cat("Class distribution:\n")
+  print(table(dt$y_target_atr, useNA = "ifany"))
+} else {
+  stop("Error: No results from parallel processing. Check your data.")
+}
 
 # Cleanup
 stopCluster(cl)
+
+# Entferne row_id Spalte (wird nicht mehr gebraucht)
+dt[, row_id := NULL]
 
 df_temp <- as.data.frame(dt)
 
