@@ -19,8 +19,17 @@ pacman::p_load(tidyverse,
 
 
 # Load File ---------------------------------------------------------------
+
+input_path = file.path("C:", "Users", "maxib",
+                       "OneDrive", "Dokumente", "Finance",
+                       "capitalcom_backtesting", "api-data")
+
+output_path = file.path("C:", "Users", "maxib",
+                        "OneDrive", "Dokumente", "Finance",
+                        "capitalcom_backtesting", "r_output")
+
 #Daten laden und vorbereiten
-df_raw <- read_csv(file.path(getwd(), "capitalcom_backtesting", "api-data", "GOLD_MINUTE_15_testdata.csv")) %>%
+df_raw <- read_csv(file.path(input_path, "GOLD_MINUTE_15_testdata.csv")) %>%
   # Stelle sicher, dass die Spaltennamen korrekt sind und die 'time' Spalte als Datum erkannt wird
   mutate(time = as.POSIXct(time, format="%Y-%m-%d %H:%M:%S")) %>%
   select(time, open, high, low, close, volume)
@@ -394,7 +403,7 @@ feature_importance <- data.frame(
 ) %>%
   arrange(desc(importance))
 
-write_csv(feature_importance, file.path(getwd(), "feature_importance.csv"))
+#write_csv(feature_importance, file.path(getwd(), "feature_importance.csv"))
 
 cat("\nResults saved:\n")
 cat("- boruta_model.rds (Boruta model object)\n")
