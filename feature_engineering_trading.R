@@ -38,9 +38,16 @@ atr_multiplier = 3
 df_temp$atr_val = ATR(df_temp[, c("high", "low", "close")], n = atr_n)[, "atr"]
 
 # Setup parallel processing
-n_cores <- parallel::detectCores() - 1
-cl <- makeCluster(n_cores)
-registerDoParallel(cl)
+use_parallel <- TRUE  # Setze auf FALSE falls parallele Verarbeitung Probleme macht
+
+if (use_parallel) {
+  n_cores <- parallel::detectCores() - 1
+  cat("Using parallel processing with", n_cores, "cores\n")
+  cl <- makeCluster(n_cores)
+  registerDoParallel(cl)
+} else {
+  cat("Using sequential processing\n")
+}
 
 # Vorbereitungen
 dt <- as.data.table(df_temp)
@@ -55,64 +62,69 @@ dt[, `:=`(
   target_down = close - atr_multiplier * atr_val
 )]
 
-# Parallel processing nach Tagen
+# Parallel processing nach Tagen - simple sequential version for reliability
 unique_dates <- unique(dt$date)
 
-results <- foreach(
-  current_date = unique_dates,
-  .packages = c('data.table', 'lubridate'),
-  .combine = rbind
-) %dopar% {
-  
-  day_data <- dt[date == current_date]
-  
-  if (nrow(day_data) <= 1) return(NULL)
-  
-  end_of_day <- ymd(current_date) + hm("22:30")
-  
-  # Ergebnis-Vektoren
-  y_vals <- rep(NA_real_, nrow(day_data))
-  target_times <- rep(as.POSIXct(NA), nrow(day_data))
-  indices <- day_data[, which = TRUE]
-  
-  for (i in seq_len(nrow(day_data) - 1)) {
-    
-    target_up <- day_data$target_up[i]
-    target_down <- day_data$target_down[i]
-    
-    future_subset <- day_data[(i+1):.N][time <= end_of_day]
-    
-    if (nrow(future_subset) == 0) next
-    
-    hit_up <- which(future_subset$high >= target_up)[1]
-    hit_down <- which(future_subset$low <= target_down)[1]
-    
-    if (!is.na(hit_up) && (is.na(hit_down) || hit_up < hit_down)) {
-      y_vals[i] <- 1
-      target_times[i] <- future_subset$time[hit_up]
-    } else if (!is.na(hit_down) && (is.na(hit_up) || hit_down < hit_up)) {
-      y_vals[i] <- -1
-      target_times[i] <- future_subset$time[hit_down]
-    } else {
-      y_vals[i] <- 0
-    }
-  }
-  
-  data.table(
-    index = indices,
-    y_target_atr = y_vals,
-    target_reached = target_times
-  )
-}
+cat("Processing", length(unique_dates), "unique dates sequentially...\n")
 
-# Merge results zurück
-dt[results$index, `:=`(
-  y_target_atr = results$y_target_atr,
-  target_reached = results$target_reached
+# Initialisiere Target Spalten
+dt[, `:=`(
+  y_target_atr = NA_real_,
+  target_reached = as.POSIXct(NA)
 )]
 
-# Cleanup
-stopCluster(cl)
+# Verarbeite jeden Tag sequentiell (zuverlässiger)
+for (current_date in unique_dates) {
+
+  day_data_idx <- which(dt$date == current_date)
+  day_data <- dt[day_data_idx]
+
+  if (nrow(day_data) <= 1) next
+
+  end_of_day <- ymd(current_date) + hm("22:30")
+
+  for (i in seq_len(nrow(day_data) - 1)) {
+
+    current_idx <- day_data_idx[i]
+    target_up <- day_data$target_up[i]
+    target_down <- day_data$target_down[i]
+
+    # Finde zukünftige Daten für diesen Tag
+    future_idx <- (i+1):nrow(day_data)
+    future_data <- day_data[future_idx]
+    future_data <- future_data[time <= end_of_day]
+
+    if (nrow(future_data) == 0) next
+
+    hit_up <- which(future_data$high >= target_up)[1]
+    hit_down <- which(future_data$low <= target_down)[1]
+
+    if (!is.na(hit_up) && (is.na(hit_down) || hit_up < hit_down)) {
+      dt[current_idx, y_target_atr := 1]
+      dt[current_idx, target_reached := future_data$time[hit_up]]
+    } else if (!is.na(hit_down) && (is.na(hit_up) || hit_down < hit_up)) {
+      dt[current_idx, y_target_atr := -1]
+      dt[current_idx, target_reached := future_data$time[hit_down]]
+    } else {
+      dt[current_idx, y_target_atr := 0]
+    }
+  }
+
+  # Progress feedback
+  if (which(unique_dates == current_date) %% 10 == 0) {
+    cat("Processed", which(unique_dates == current_date), "of", length(unique_dates), "dates\n")
+  }
+}
+
+cat("\nTarget variable calculation completed!\n")
+cat("Target variable successfully calculated for", sum(!is.na(dt$y_target_atr)), "rows\n")
+cat("Class distribution:\n")
+print(table(dt$y_target_atr, useNA = "ifany"))
+
+# Cleanup parallel cluster if used
+if (use_parallel) {
+  stopCluster(cl)
+}
 
 df_temp <- as.data.frame(dt)
 
