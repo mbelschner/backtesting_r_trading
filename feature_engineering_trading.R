@@ -19,8 +19,13 @@ pacman::p_load(tidyverse,
 
 
 # Load File ---------------------------------------------------------------
+
+core_path = "C:/Users/maxib/OneDrive/Dokumente/Finance/capitalcom_backtesting"
+input_path = file.path(core_path, "api-data")
+output_path = file.path(core_path, "r_output")
+
 #Daten laden und vorbereiten
-df_raw <- read_csv(file.path(getwd(), "capitalcom_backtesting", "api-data", "GOLD_MINUTE_15_testdata.csv")) %>%
+df_raw <- read_csv(file.path(input_path, "GOLD_MINUTE_15_testdata.csv")) %>%
   # Stelle sicher, dass die Spaltennamen korrekt sind und die 'time' Spalte als Datum erkannt wird
   mutate(time = as.POSIXct(time, format="%Y-%m-%d %H:%M:%S")) %>%
   select(time, open, high, low, close, volume)
