@@ -4,6 +4,42 @@ rm(list=ls())
 gc()
 
 
+# KONFIGURATION -----------------------------------------------------------
+
+# BORUTA PERFORMANCE EINSTELLUNGEN
+# Für schnellere Ausführung: niedrigere Werte
+# Für bessere Genauigkeit: höhere Werte
+#
+# PERFORMANCE PROFILE EMPFEHLUNGEN:
+#
+# SCHNELL (5-15 Minuten):
+#   BORUTA_MAX_RUNS <- 50
+#   BORUTA_NUM_TREES <- 250
+#   BORUTA_SAMPLE_SIZE <- 30000
+#   BORUTA_USE_FAST_IMP <- TRUE
+#
+# BALANCED (15-45 Minuten) - EMPFOHLEN:
+#   BORUTA_MAX_RUNS <- 100
+#   BORUTA_NUM_TREES <- 500
+#   BORUTA_SAMPLE_SIZE <- 50000
+#   BORUTA_USE_FAST_IMP <- TRUE
+#
+# GENAU (1-3 Stunden):
+#   BORUTA_MAX_RUNS <- 200
+#   BORUTA_NUM_TREES <- 1000
+#   BORUTA_SAMPLE_SIZE <- 100000
+#   BORUTA_USE_FAST_IMP <- FALSE
+
+BORUTA_MAX_RUNS <- 100        # Anzahl Iterationen (50-200)
+BORUTA_NUM_TREES <- 500       # Anzahl Trees pro Iteration (250-1000)
+BORUTA_SAMPLE_SIZE <- 50000   # Max. Zeilen für Boruta (20000-100000)
+BORUTA_USE_FAST_IMP <- TRUE   # TRUE = schneller, FALSE = genauer
+
+# Target Variable Einstellungen
+ATR_PERIOD <- 14
+ATR_MULTIPLIER <- 3
+
+
 # Packages ----------------------------------------------------------------
 
 pacman::p_load(tidyverse,
@@ -37,10 +73,8 @@ df_raw <- read_csv(file.path(input_path, "GOLD_MINUTE_15_testdata.csv")) %>%
 #Sie ist 0 wenn der Kurs sich nicht genug verändert.
 
 df_temp = df_raw
-atr_n = 14
-atr_multiplier = 3
 
-df_temp$atr_val = ATR(df_temp[, c("high", "low", "close")], n = atr_n)[, "atr"]
+df_temp$atr_val = ATR(df_temp[, c("high", "low", "close")], n = ATR_PERIOD)[, "atr"]
 
 # Setup parallel processing
 n_cores <- parallel::detectCores() - 1
@@ -56,8 +90,8 @@ dt[, `:=`(
 )]
 dt <- dt[!(hour >= 22 & minute >= 30)]
 dt[, `:=`(
-  target_up = close + atr_multiplier * atr_val,
-  target_down = close - atr_multiplier * atr_val
+  target_up = close + ATR_MULTIPLIER * atr_val,
+  target_down = close - ATR_MULTIPLIER * atr_val
 )]
 
 # Füge einen eindeutigen Row-Index hinzu für parallele Verarbeitung
@@ -359,22 +393,78 @@ print(table(df_test$y_target_atr))
 # Boruta Feature Selection ------------------------------------------------
 
 cat("\nStarting Boruta Feature Selection...\n")
-cat("This may take a while...\n")
 
 # Konvertiere Target zu Factor für Boruta
 df_train_boruta <- df_train
 df_train_boruta$y_target_atr <- as.factor(df_train_boruta$y_target_atr)
 
-# Führe Boruta aus
-# maxRuns limitieren um Overfitting zu vermeiden
+# PERFORMANCE OPTIMIERUNGEN
+
+# 1. Optional: Sampling für sehr große Datasets (beschleunigt Boruta erheblich)
+use_sampling <- nrow(df_train_boruta) > BORUTA_SAMPLE_SIZE
+sample_size <- min(BORUTA_SAMPLE_SIZE, nrow(df_train_boruta))
+
+if (use_sampling) {
+  cat("Dataset is large (", nrow(df_train_boruta), "rows). Using stratified sample of", sample_size, "rows for Boruta.\n")
+  # Stratified sampling um Class Balance zu erhalten
+  set.seed(123)
+  sample_idx <- c(
+    sample(which(df_train_boruta$y_target_atr == -1),
+           size = min(sum(df_train_boruta$y_target_atr == -1), floor(sample_size/3))),
+    sample(which(df_train_boruta$y_target_atr == 0),
+           size = min(sum(df_train_boruta$y_target_atr == 0), floor(sample_size/3))),
+    sample(which(df_train_boruta$y_target_atr == 1),
+           size = min(sum(df_train_boruta$y_target_atr == 1), floor(sample_size/3)))
+  )
+  df_train_boruta_sample <- df_train_boruta[sample_idx, ]
+} else {
+  df_train_boruta_sample <- df_train_boruta
+}
+
+cat("Using", nrow(df_train_boruta_sample), "rows for Boruta feature selection\n")
+
+# 2. Vorfilterung: Entferne Features mit sehr geringer Varianz (beschleunigt Boruta)
+cat("Pre-filtering features with near-zero variance...\n")
+near_zero_var <- sapply(df_train_boruta_sample[, -ncol(df_train_boruta_sample)], function(x) {
+  if (is.numeric(x)) {
+    var_x <- var(x, na.rm = TRUE)
+    return(is.na(var_x) || var_x < 1e-10)
+  }
+  return(FALSE)
+})
+
+if (sum(near_zero_var) > 0) {
+  cat("Removing", sum(near_zero_var), "features with near-zero variance\n")
+  features_to_remove <- names(near_zero_var)[near_zero_var]
+  df_train_boruta_sample <- df_train_boruta_sample %>%
+    select(-all_of(features_to_remove))
+}
+
+cat("Features for Boruta:", ncol(df_train_boruta_sample) - 1, "\n")
+
+# 3. Führe Boruta mit Parallelisierung aus
+cat("\nRunning Boruta with parallel processing...\n")
+cat("This may take a while...\n")
+
+# Bestimme Anzahl Cores für Boruta (ranger nutzt diese automatisch)
+boruta_cores <- max(1, parallel::detectCores() - 1)
+
 set.seed(123)  # Für Reproduzierbarkeit
+
+# Wähle Importance-Funktion basierend auf Konfiguration
+imp_function <- if (BORUTA_USE_FAST_IMP) getImpRfZ else getImpRfRaw
+
 boruta_output <- Boruta(
   y_target_atr ~ .,
-  data = df_train_boruta,
+  data = df_train_boruta_sample,
   doTrace = 2,
-  maxRuns = 100,  # Limitiere Iterationen
-  num.trees = 500  # Für ranger
+  maxRuns = BORUTA_MAX_RUNS,
+  num.trees = BORUTA_NUM_TREES,
+  num.threads = boruta_cores,  # PARALLELISIERUNG!
+  getImp = imp_function
 )
+
+cat("Boruta completed with", BORUTA_MAX_RUNS, "max runs,", BORUTA_NUM_TREES, "trees, and", boruta_cores, "cores\n")
 
 cat("\nBoruta Feature Selection Results:\n")
 print(boruta_output)
