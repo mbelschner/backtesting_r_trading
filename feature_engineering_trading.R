@@ -62,16 +62,22 @@ dt[, row_id := .I]
 unique_dates <- unique(dt$date)
 
 cat("Processing", length(unique_dates), "unique dates with parallel processing...\n")
+cat("Total rows in dt:", nrow(dt), "\n")
+
+# Erstelle eine Liste von Daten-Chunks für jeden Tag
+date_chunks <- lapply(unique_dates, function(d) {
+  dt[date == d]
+})
+
+cat("Created", length(date_chunks), "date chunks\n")
 
 results <- foreach(
-  current_date = unique_dates,
+  day_data = date_chunks,
   .packages = c('data.table', 'lubridate'),
   .combine = function(...) rbindlist(list(...), use.names = TRUE, fill = TRUE),
-  .export = c('dt'),
-  .errorhandling = 'pass'
+  .errorhandling = 'pass',
+  .verbose = FALSE
 ) %dopar% {
-
-  day_data <- dt[date == current_date]
 
   # Wenn zu wenig Daten, gebe leeres data.table zurück (nicht NULL)
   if (nrow(day_data) <= 1) {
@@ -82,12 +88,13 @@ results <- foreach(
     ))
   }
 
+  current_date <- day_data$date[1]
   end_of_day <- ymd(current_date) + hm("22:30")
 
   # Ergebnis-Vektoren
   y_vals <- rep(NA_real_, nrow(day_data))
   target_times <- rep(as.POSIXct(NA), nrow(day_data))
-  row_ids <- day_data$row_id  # Verwende row_id statt which = TRUE
+  row_ids <- day_data$row_id
 
   for (i in seq_len(nrow(day_data) - 1)) {
 
@@ -122,15 +129,24 @@ results <- foreach(
 # Merge results zurück
 cat("Processing completed. Merging results...\n")
 cat("Results rows:", nrow(results), "\n")
+cat("Results structure:\n")
+print(str(results))
+cat("\nFirst few rows of results:\n")
+print(head(results, 20))
 
 if (!is.null(results) && nrow(results) > 0) {
+  # Check row_id validity
+  cat("\nrow_id range in results:", min(results$row_id, na.rm = TRUE), "to", max(results$row_id, na.rm = TRUE), "\n")
+  cat("row_id range in dt:", min(dt$row_id), "to", max(dt$row_id), "\n")
+  cat("Number of unique row_ids in results:", length(unique(results$row_id)), "\n")
+
   # Merge basierend auf row_id
   dt[results$row_id, `:=`(
     y_target_atr = results$y_target_atr,
     target_reached = results$target_reached
   )]
 
-  cat("Target variable successfully calculated for", sum(!is.na(dt$y_target_atr)), "rows\n")
+  cat("\nTarget variable successfully calculated for", sum(!is.na(dt$y_target_atr)), "rows\n")
   cat("Class distribution:\n")
   print(table(dt$y_target_atr, useNA = "ifany"))
 } else {
