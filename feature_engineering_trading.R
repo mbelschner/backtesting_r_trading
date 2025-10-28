@@ -1,4 +1,11 @@
-#Mit diesem Script werden wir Feature Engineering machen
+# Feature Engineering für Trading mit Triple Barrier Labels
+#
+# Dieses Script:
+# - Lädt bereits gelabelte Daten (Triple Barrier Methode)
+# - Konvertiert Log-Preise zurück zu normalen Preisen
+# - Berechnet technische Indikatoren als Features
+# - Verwendet Boruta für Feature Selection (ohne Preisdaten als Predictors)
+# - Erstellt Train/Test Datasets
 
 rm(list=ls())
 gc()
@@ -20,122 +27,58 @@ pacman::p_load(tidyverse,
 
 # Load File ---------------------------------------------------------------
 
-input_path = file.path("C:", "Users", "maxib",
-                       "OneDrive", "Dokumente", "Finance",
-                       "capitalcom_backtesting", "api-data")
+# Lade bereits gelabelte Daten (Triple Barrier Methode)
+labelled_data_path <- file.path("C:", "Users", "maxib",
+                                "OneDrive", "Dokumente", "Finance",
+                                "R ML Trading Complete", "labelled_data",
+                                "triplebarrier_labelled_GOLD_MINUTE_15.csv")
 
-output_path = file.path("C:", "Users", "maxib",
-                        "OneDrive", "Dokumente", "Finance",
-                        "capitalcom_backtesting", "r_output")
+cat("Loading pre-labelled data from Triple Barrier method...\n")
 
-#Daten laden und vorbereiten
-df_raw <- read_csv(file.path(input_path, "GOLD_MINUTE_15_testdata.csv")) %>%
-  # Stelle sicher, dass die Spaltennamen korrekt sind und die 'time' Spalte als Datum erkannt wird
-  mutate(time = as.POSIXct(time, format="%Y-%m-%d %H:%M:%S")) %>%
-  select(time, open, high, low, close, volume)
+# Daten laden
+df_raw <- read_csv(labelled_data_path)
 
+# Zeige verfügbare Spalten
+cat("Available columns in dataset:\n")
+print(names(df_raw))
 
-# Create Target Variable --------------------------------------------------
+# Konvertiere Log-Preise zurück zu normalen Preisen für Feature Engineering
+# (Technische Indikatoren sind für normale Preise konzipiert)
+cat("\nConverting log prices back to normal prices for feature engineering...\n")
 
-#Hier machen wir die Target Variable. Sie ist -1 wenn der Kurs um 3x den ATR sinkt und 1 wenn er um 3x den ATR steigt
-#Sie ist 0 wenn der Kurs sich nicht genug verändert.
+df_temp <- df_raw %>%
+  mutate(
+    # Konvertiere time Spalte falls vorhanden
+    time = as.POSIXct(time, format="%Y-%m-%d %H:%M:%S"),
+    # Konvertiere Log-Preise zurück zu normalen Preisen
+    open = exp(open),
+    high = exp(high),
+    low = exp(low),
+    close = exp(close)
+  )
 
-df_temp = df_raw
-atr_n = 14
-atr_multiplier = 3
+# Mappe Triple Barrier Labels zu numerischen Werten
+# "Short (Lower Barrier)" -> -1
+# "Neutral (Time)" -> 0
+# "Long (Upper Barrier)" -> 1
+cat("\nMapping Triple Barrier labels to numeric values...\n")
 
-df_temp$atr_val = ATR(df_temp[, c("high", "low", "close")], n = atr_n)[, "atr"]
+df_temp <- df_temp %>%
+  mutate(
+    y_target_atr = case_when(
+      label == "Short (Lower Barrier)" ~ -1,
+      label == "Neutral (Time)" ~ 0,
+      label == "Long (Upper Barrier)" ~ 1,
+      TRUE ~ NA_real_
+    )
+  )
 
-# Setup parallel processing
-use_parallel <- TRUE  # Setze auf FALSE falls parallele Verarbeitung Probleme macht
+cat("Label distribution:\n")
+print(table(df_temp$y_target_atr, useNA = "ifany"))
 
-if (use_parallel) {
-  n_cores <- parallel::detectCores() - 1
-  cat("Using parallel processing with", n_cores, "cores\n")
-  cl <- makeCluster(n_cores)
-  registerDoParallel(cl)
-} else {
-  cat("Using sequential processing\n")
-}
-
-# Vorbereitungen
-dt <- as.data.table(df_temp)
-dt[, `:=`(
-  hour = hour(time),
-  minute = minute(time),
-  date = as.Date(time)
-)]
-dt <- dt[!(hour >= 22 & minute >= 30)]
-dt[, `:=`(
-  target_up = close + atr_multiplier * atr_val,
-  target_down = close - atr_multiplier * atr_val
-)]
-
-# Parallel processing nach Tagen - simple sequential version for reliability
-unique_dates <- unique(dt$date)
-
-cat("Processing", length(unique_dates), "unique dates sequentially...\n")
-
-# Initialisiere Target Spalten
-dt[, `:=`(
-  y_target_atr = NA_real_,
-  target_reached = as.POSIXct(NA)
-)]
-
-# Verarbeite jeden Tag sequentiell (zuverlässiger)
-for (current_date in unique_dates) {
-
-  day_data_idx <- which(dt$date == current_date)
-  day_data <- dt[day_data_idx]
-
-  if (nrow(day_data) <= 1) next
-
-  end_of_day <- ymd(current_date) + hm("22:30")
-
-  for (i in seq_len(nrow(day_data) - 1)) {
-
-    current_idx <- day_data_idx[i]
-    target_up <- day_data$target_up[i]
-    target_down <- day_data$target_down[i]
-
-    # Finde zukünftige Daten für diesen Tag
-    future_idx <- (i+1):nrow(day_data)
-    future_data <- day_data[future_idx]
-    future_data <- future_data[time <= end_of_day]
-
-    if (nrow(future_data) == 0) next
-
-    hit_up <- which(future_data$high >= target_up)[1]
-    hit_down <- which(future_data$low <= target_down)[1]
-
-    if (!is.na(hit_up) && (is.na(hit_down) || hit_up < hit_down)) {
-      dt[current_idx, y_target_atr := 1]
-      dt[current_idx, target_reached := future_data$time[hit_up]]
-    } else if (!is.na(hit_down) && (is.na(hit_up) || hit_down < hit_up)) {
-      dt[current_idx, y_target_atr := -1]
-      dt[current_idx, target_reached := future_data$time[hit_down]]
-    } else {
-      dt[current_idx, y_target_atr := 0]
-    }
-  }
-
-  # Progress feedback
-  if (which(unique_dates == current_date) %% 10 == 0) {
-    cat("Processed", which(unique_dates == current_date), "of", length(unique_dates), "dates\n")
-  }
-}
-
-cat("\nTarget variable calculation completed!\n")
-cat("Target variable successfully calculated for", sum(!is.na(dt$y_target_atr)), "rows\n")
-cat("Class distribution:\n")
-print(table(dt$y_target_atr, useNA = "ifany"))
-
-# Cleanup parallel cluster if used
-if (use_parallel) {
-  stopCluster(cl)
-}
-
-df_temp <- as.data.frame(dt)
+# Wähle relevante Spalten
+df_temp <- df_temp %>%
+  select(time, open, high, low, close, volume, y_target_atr)
 
 
 # Feature Engineering -----------------------------------------------------
@@ -290,13 +233,20 @@ df_model <- df_features %>%
 
 cat("Rows after removing NA targets:", nrow(df_model), "\n")
 
-# Wähle relevante Spalten aus (alle Features außer Metadaten)
+# Wähle relevante Spalten aus (alle Features außer Metadaten und Preisdaten)
 # Entferne: time, date, hour, minute, target_up, target_down, target_reached
+# UND auch die Preisdaten: open, high, low, close, volume (diese sollen NICHT als Features verwendet werden)
 feature_cols <- setdiff(
   names(df_model),
   c("time", "date", "hour", "minute", "target_up", "target_down",
-    "target_reached", "y_target_atr")
+    "target_reached", "y_target_atr",
+    "open", "high", "low", "close", "volume", "atr_val")
 )
+
+cat("Excluded columns (not used as features):\n")
+cat("  - Price data: open, high, low, close, volume\n")
+cat("  - Metadata: time, date, hour, minute\n")
+cat("  - Target related: y_target_atr, target_up, target_down, target_reached, atr_val\n\n")
 
 # Erstelle finalen Dataset mit Features und Target
 df_final <- df_model %>%
